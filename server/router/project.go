@@ -172,8 +172,8 @@ func ListProjects(ctx *gin.Context) {
 		return
 	}
 
-	// Calculate the aggregated scores
-	scores, err := judging.AggregateScores(state.Db, ctx)
+	// Calculate the aggregated scores (served from 10-second TTL cache)
+	scores, err := state.GetCachedScores(ctx)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error calculating scores: " + err.Error()})
 		return

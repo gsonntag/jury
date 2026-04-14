@@ -108,6 +108,7 @@ func NewRouter(db *mongo.Database, logger *logging.Logger) *gin.Engine {
 	// Admin panel - stats/data
 	adminRouter.GET("/admin/stats", GetAdminStats)
 	adminRouter.GET("/admin/stats/:track", GetAdminTrackStats)
+	adminRouter.GET("/admin/dashboard", GetDashboard)
 	adminRouter.GET("/project/stats", ProjectStats)
 	adminRouter.GET("/judge/stats", JudgeStats)
 	adminRouter.GET("/admin/flags", GetFlags)

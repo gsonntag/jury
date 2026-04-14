@@ -6,8 +6,10 @@ import (
 	"server/config"
 	"server/database"
 	"server/funcs"
+	"server/judging"
 	"server/models"
 	"server/util"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -56,7 +58,7 @@ func AdminAuthenticated(ctx *gin.Context) {
 // GET /admin/stats - GetAdminStats returns stats about the system
 func GetAdminStats(ctx *gin.Context) {
 	state := GetState(ctx)
-	stats, err := database.AggregateStats(state.Db, "")
+	stats, err := state.GetCachedStats("")
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error aggregating stats: " + err.Error()})
 		return
@@ -68,7 +70,7 @@ func GetAdminStats(ctx *gin.Context) {
 func GetAdminTrackStats(ctx *gin.Context) {
 	state := GetState(ctx)
 	track := ctx.Param("track")
-	stats, err := database.AggregateStats(state.Db, track)
+	stats, err := state.GetCachedStats(track)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error aggregating stats: " + err.Error()})
 		return
@@ -833,5 +835,103 @@ func SetTrackViews(ctx *gin.Context) {
 	// Send OK
 	state.Logger.AdminLogf("Updated track views to %s", util.StructToStringWithoutNils(req))
 	ctx.JSON(http.StatusOK, gin.H{"ok": 1})
+}
+
+// GET /admin/dashboard - GetDashboard gathers all data needed by the admin dashboard
+// in one request.  The four DB-bound fetches run concurrently so total latency equals
+// the slowest single query rather than the sum of all queries.  Clock and options are
+// served from memory with zero DB cost.
+func GetDashboard(ctx *gin.Context) {
+	state := GetState(ctx)
+
+	// Optional track filter passed as ?track=<name>
+	track := ctx.Query("track")
+
+	// Zero-cost in-memory reads.
+	opts := state.GetCachedOptions()
+	state.Clock.Mutex.Lock()
+	clockRunning := state.Clock.State.Running
+	clockTime := state.Clock.State.GetDuration()
+	state.Clock.Mutex.Unlock()
+
+	var (
+		stats    *models.Stats
+		projects []*models.Project
+		scores   map[primitive.ObjectID]judging.ProjectScores
+		judges   []*models.Judge
+		flags    []*models.Flag
+
+		statsErr    error
+		projectsErr error
+		scoresErr   error
+		judgesErr   error
+		flagsErr    error
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	go func() {
+		defer wg.Done()
+		stats, statsErr = state.GetCachedStats(track)
+	}()
+
+	go func() {
+		defer wg.Done()
+		projects, projectsErr = database.FindAllProjects(state.Db, ctx)
+		if projectsErr == nil {
+			scores, scoresErr = state.GetCachedScores(ctx)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		judges, judgesErr = database.FindAllJudges(state.Db, ctx)
+	}()
+
+	go func() {
+		defer wg.Done()
+		flags, flagsErr = database.FindAllFlags(state.Db)
+	}()
+
+	wg.Wait()
+
+	if statsErr != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error aggregating stats: " + statsErr.Error()})
+		return
+	}
+	if projectsErr != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting projects: " + projectsErr.Error()})
+		return
+	}
+	if scoresErr != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error calculating scores: " + scoresErr.Error()})
+		return
+	}
+	if judgesErr != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting judges: " + judgesErr.Error()})
+		return
+	}
+	if flagsErr != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting flags: " + flagsErr.Error()})
+		return
+	}
+
+	for i, p := range projects {
+		if pScore, ok := scores[p.Id]; ok {
+			projects[i].Score = pScore.Score
+			projects[i].Stars = pScore.Stars
+			projects[i].TrackStars = pScore.TrackStars
+		}
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"stats":    stats,
+		"clock":    gin.H{"time": clockTime, "running": clockRunning},
+		"projects": projects,
+		"judges":   judges,
+		"options":  opts,
+		"flags":    flags,
+	})
 }
 
