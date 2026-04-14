@@ -107,15 +107,11 @@ func AddProject(ctx *gin.Context) {
 
 	var project *models.Project
 
+	// Read options from cache before the transaction.
+	options := state.GetCachedOptions()
+
 	// Run the remaining actions in a transaction
 	err = database.WithTransaction(state.Db, func(sc mongo.SessionContext) error {
-		// Get the options from the database
-		options, err := database.GetOptions(state.Db, sc)
-		if err != nil {
-			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting options from database: " + err.Error()})
-			return err
-		}
-
 		// If the challenge list contains the ignore track, skip the project
 		ignore := false
 		for _, ignoreTrack := range options.IgnoreTracks {
@@ -464,12 +460,7 @@ func GetProjectCount(ctx *gin.Context) {
 
 	var count int64
 
-	// Get the options from the database
-	options, err := database.GetOptions(state.Db, ctx)
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting options from database: " + err.Error()})
-		return
-	}
+	options := state.GetCachedOptions()
 
 	// If the tracks option is enabled, get the project count for the judge's track
 	if options.JudgeTracks && judge.Track != "" {
@@ -486,7 +477,7 @@ func GetProjectCount(ctx *gin.Context) {
 	}
 
 	// Get the project from the database
-	count, err = database.CountProjectDocuments(state.Db)
+	count, err := database.CountProjectDocuments(state.Db)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting project count from database: " + err.Error()})
 		return
@@ -684,21 +675,15 @@ func MoveProjectGroup(ctx *gin.Context) {
 		return
 	}
 
+	// Validate group number from cache before starting a transaction.
+	cachedOpts := state.GetCachedOptions()
+	if moveReq.Group < 0 || moveReq.Group >= cachedOpts.NumGroups {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid group number"})
+		return
+	}
+
 	// Run the remaining actions in a transaction
 	err = database.WithTransaction(state.Db, func(sc mongo.SessionContext) error {
-		// Get options from database
-		options, err := database.GetOptions(state.Db, sc)
-		if err != nil {
-			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting options: " + err.Error()})
-			return err
-		}
-
-		// Make sure valid group
-		if moveReq.Group < 0 || moveReq.Group >= options.NumGroups {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid group number"})
-			return errors.New("invalid group number")
-		}
-
 		// Get max number in group
 		currMaxNum, err := database.GetGroupMaxNum(state.Db, sc, moveReq.Group)
 		if err != nil {
@@ -710,9 +695,9 @@ func MoveProjectGroup(ctx *gin.Context) {
 			return errors.New("error getting group max number")
 		}
 
-		// Get maximum number for the given group
+		// Get maximum number for the given group (use cached options closed over from above)
 		maxGroupNum := int64(0)
-		for i, size := range options.GroupSizes {
+		for i, size := range cachedOpts.GroupSizes {
 			maxGroupNum += size
 			if int64(i) == moveReq.Group {
 				break
@@ -720,7 +705,7 @@ func MoveProjectGroup(ctx *gin.Context) {
 		}
 
 		// Make sure the group has space (check for max group number and make sure it doesn't exceed)
-		if moveReq.Group < options.NumGroups-1 && currMaxNum >= maxGroupNum {
+		if moveReq.Group < cachedOpts.NumGroups-1 && currMaxNum >= maxGroupNum {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": "group is full, cannot move project to provided group"})
 			return err
 		}
@@ -818,21 +803,15 @@ func MoveSelectedProjectsGroup(ctx *gin.Context) {
 		return
 	}
 
+	// Validate group number from cache before starting a transaction.
+	cachedOpts2 := state.GetCachedOptions()
+	if moveReq.Group < 0 || moveReq.Group >= cachedOpts2.NumGroups {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid group number"})
+		return
+	}
+
 	// Run the remaining actions in a transaction
 	err = database.WithTransaction(state.Db, func(sc mongo.SessionContext) error {
-		// Get options from database
-		options, err := database.GetOptions(state.Db, sc)
-		if err != nil {
-			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "error getting options: " + err.Error()})
-			return err
-		}
-
-		// Make sure valid group
-		if moveReq.Group < 0 || moveReq.Group >= options.NumGroups {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid group number"})
-			return errors.New("invalid group number")
-		}
-
 		// Get max number in group
 		currMaxNum, err := database.GetGroupMaxNum(state.Db, ctx, moveReq.Group)
 		if err != nil {
@@ -844,9 +823,9 @@ func MoveSelectedProjectsGroup(ctx *gin.Context) {
 			return errors.New("error getting group max number")
 		}
 
-		// Get maximum number for the given group
+		// Get maximum number for the given group (use cached options closed over from above)
 		maxGroupNum := int64(0)
-		for i, size := range options.GroupSizes {
+		for i, size := range cachedOpts2.GroupSizes {
 			maxGroupNum += size
 			if int64(i) == moveReq.Group {
 				break
@@ -854,7 +833,7 @@ func MoveSelectedProjectsGroup(ctx *gin.Context) {
 		}
 
 		// Check if the group has space (check for max group number and make sure it doesn't exceed)
-		if moveReq.Group < options.NumGroups-1 && currMaxNum+int64(len(moveReq.Items)) > maxGroupNum {
+		if moveReq.Group < cachedOpts2.NumGroups-1 && currMaxNum+int64(len(moveReq.Items)) > maxGroupNum {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": "group is full, cannot move projects to provided group"})
 			return errors.New("group is full, cannot move projects to provided group")
 		}
